@@ -114,6 +114,9 @@ void InitEntranceTrackingData();
 s16 GetLastEntranceOverride();
 s16 GetCurrentGrottoId();
 const EntranceData* GetEntranceData(s16);
+bool IsEntranceDiscovered(s16 index);
+// Index of the entrance whose destination the given entrance leads to in this seed, the index itself if not shuffled
+s16 GetEntranceOverrideIndex(s16 index);
 void LoadFromPreset(const nlohmann::json& info);
 
 class EntranceTrackerSettingsWindow final : public Ship::GuiWindow {

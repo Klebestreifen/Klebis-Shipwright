@@ -1,9 +1,12 @@
 #include "randomizer_entrance_tracker.h"
+#include "randomizer_entrance_pathfinder.h"
 #include "randomizer_tracker_windows.h"
 #include "soh/OTRGlobals.h"
 #include "soh/SohGui/SohGui.hpp"
 
+#include <algorithm>
 #include <string>
+#include <unordered_map>
 #include <vector>
 #include <libultraship/controller/controldeck/ControlDeck.h>
 #include <ship/Context.h>
@@ -12,6 +15,7 @@
 extern "C" {
 #include <z64.h>
 #include "macros.h"
+#include "variables.h"
 extern PlayState* gPlayState;
 
 #include "soh/Enhancements/randomizer/randomizer_entrance.h"
@@ -40,6 +44,20 @@ static const EntranceOverride emptyOverride = { 0 };
 static s16 lastEntranceIndex = -1;
 static s16 currentGrottoId = -1;
 static s16 lastSceneOrEntranceDetected = -1;
+
+// Where each shuffled entrance leads to, as the index of the entrance that has this destination in vanilla
+static std::unordered_map<s16, s16> entranceOverrideIndices;
+
+// Navigation: the destination picked by the player and the route to it
+static int32_t navigationTarget = -1;
+static int32_t navigationCurrentPlace = -1;
+static EntrancePathfinder::Route navigationRoute;
+// The places offered as a destination, sorted by name
+static std::vector<int32_t> navigationPlaces;
+// Set by everything that may change the route. The route is only recalculated when it is drawn.
+static bool routeDirty = true;
+static bool routeIgnoresLogic = false;
+static RandoAgeTime routeAgeTime = RAT_NONE;
 
 Color_RGBA8 Color_Background = { 0, 0, 0, 255 };
 static WidgetInfo backgroundColorWidget;
@@ -617,16 +635,33 @@ void SetLastEntranceOverrideForTracker(s16 entranceIndex) {
     lastEntranceIndex = entranceIndex;
 }
 
+s16 GetEntranceOverrideIndex(s16 index) {
+    auto iter = entranceOverrideIndices.find(index);
+    return iter != entranceOverrideIndices.end() ? iter->second : index;
+}
+
+static void ClearNavigationData() {
+    entranceOverrideIndices.clear();
+    navigationTarget = -1;
+    navigationCurrentPlace = -1;
+    navigationRoute = {};
+    navigationPlaces.clear();
+    routeDirty = true;
+    EntrancePathfinder::Reset();
+}
+
 void ClearEntranceTrackingData() {
     currentGrottoId = -1;
     lastEntranceIndex = -1;
     lastSceneOrEntranceDetected = -1;
     gEntranceTrackingData = { 0 };
+    ClearNavigationData();
 }
 
 void InitEntranceTrackingData() {
     auto entranceCtx = Rando::Context::GetInstance()->GetEntranceShuffler();
     gEntranceTrackingData = { 0 };
+    ClearNavigationData();
 
     // Check if entrance randomization is disabled
     if (!OTRGlobals::Instance->gRandomizer->GetRandoSettingValue(RSK_SHUFFLE_ENTRANCES)) {
@@ -640,6 +675,8 @@ void InitEntranceTrackingData() {
         }
         const EntranceData* index = GetEntranceData(entranceCtx->entranceOverrides[i].index);
         const EntranceData* override = GetEntranceData(entranceCtx->entranceOverrides[i].override);
+
+        entranceOverrideIndices[entranceCtx->entranceOverrides[i].index] = entranceCtx->entranceOverrides[i].override;
 
         if (index->srcGroup == ENTRANCE_GROUP_ONE_WAY) {
             gEntranceTrackingData.GroupEntranceCounts[ENTRANCE_SOURCE_AREA][ENTRANCE_GROUP_ONE_WAY]++;
@@ -790,6 +827,21 @@ void EntranceTrackerSettingsWindow::DrawElement() {
         ImGui::EndTable();
     }
 
+    ImGui::Text("Navigation");
+    CVarCheckbox("Enable Navigation", CVAR_TRACKER_ENTRANCE("EnableNavigation"),
+                 CheckboxOptions()
+                     .Tooltip("Adds a section to the entrance tracker that shows the way from Link's location to a "
+                              "place he has already visited. Shuffled entrances are only used once they are "
+                              "discovered, so the route never reveals anything")
+                     .DefaultValue(true)
+                     .Color(THEME_COLOR));
+    CVarCheckbox("Ignore Logic", CVAR_TRACKER_ENTRANCE("NavigationIgnoreLogic"),
+                 CheckboxOptions({ { .disabled = !CVarGetInteger(CVAR_TRACKER_ENTRANCE("EnableNavigation"), 1),
+                                     .disabledTooltip = "This option is disabled because navigation is disabled." } })
+                     .Tooltip("Also show routes that are not in logic with the current items, age and time of day. "
+                              "Undiscovered entrances and missing warp songs are still not used")
+                     .Color(THEME_COLOR));
+
     ImGui::SetNextItemOpen(false, ImGuiCond_Once);
     if (ImGui::TreeNode("Legend")) {
         ImGui::TextColored(ImColor(COLOR_ORANGE), "Last Entrance");
@@ -797,6 +849,142 @@ void EntranceTrackerSettingsWindow::DrawElement() {
         ImGui::TextColored(ImColor(COLOR_GRAY), "Undiscovered Entrances");
         ImGui::TreePop();
     }
+}
+
+static void SetNavigationTarget(int32_t place) {
+    navigationTarget = place;
+    navigationRoute = {};
+    routeDirty = true;
+}
+
+// Brings the destination list and the route up to date, if anything they depend on has changed
+static void UpdateNavigation() {
+    // Age and time of day change without any event that could be hooked
+    bool ignoreLogic = CVarGetInteger(CVAR_TRACKER_ENTRANCE("NavigationIgnoreLogic"), 0);
+    RandoAgeTime ageTime = EntrancePathfinder::GetCurrentAgeTime();
+    if (ignoreLogic != routeIgnoresLogic || ageTime != routeAgeTime) {
+        routeIgnoresLogic = ignoreLogic;
+        routeAgeTime = ageTime;
+        routeDirty = true;
+    }
+
+    if (!routeDirty) {
+        return;
+    }
+
+    const std::vector<EntrancePathfinder::Place>& places = EntrancePathfinder::GetPlaces();
+    if (places.empty()) {
+        // The logic graph is not available yet, try again on the next draw
+        return;
+    }
+    routeDirty = false;
+
+    EntrancePathfinder::UpdateVisitedPlaces();
+    navigationCurrentPlace = EntrancePathfinder::GetCurrentPlace();
+    navigationPlaces.clear();
+    for (size_t i = 0; i < places.size(); i++) {
+        if (places[i].visited) {
+            navigationPlaces.push_back((int32_t)i);
+        }
+    }
+    std::sort(navigationPlaces.begin(), navigationPlaces.end(),
+              [&places](int32_t a, int32_t b) { return places[a].name < places[b].name; });
+
+    if (navigationTarget >= (int32_t)places.size()) {
+        navigationTarget = -1;
+    }
+    navigationRoute = {};
+    if (navigationTarget != -1) {
+        navigationRoute = EntrancePathfinder::FindRoute(navigationTarget, ignoreLogic);
+    }
+}
+
+static void DrawNavigation() {
+    static ImGuiTextFilter placeSearch;
+
+    ImGui::SetNextItemOpen(false, ImGuiCond_Once);
+    PushStyleHeader(THEME_COLOR);
+    bool isOpen = ImGui::CollapsingHeader("Navigation");
+    PopStyleHeader();
+    if (!isOpen) {
+        return;
+    }
+
+    UpdateNavigation();
+    const std::vector<EntrancePathfinder::Place>& places = EntrancePathfinder::GetPlaces();
+
+    if (Button("Clear##Navigation", ButtonOptions({ { .tooltip = "Clear the destination and its search field" } })
+                                        .Color(THEME_COLOR)
+                                        .Size(Sizes::Inline))) {
+        placeSearch.Clear();
+        SetNavigationTarget(-1);
+    }
+    ImGui::SameLine();
+    PushStyleCombobox(THEME_COLOR);
+    placeSearch.Draw("Destination (inc,-exc)");
+    PopStyleCombobox();
+
+    // Only places the player has already been to are offered, so the list does not reveal anything
+    const float lineHeight = ImGui::GetTextLineHeightWithSpacing();
+    ImGui::BeginChild("ChildEntranceTrackerNavigationPlaces", ImVec2(0, lineHeight * 6), ImGuiChildFlags_Borders);
+    int32_t clickedPlace = -1;
+    for (int32_t place : navigationPlaces) {
+        // The scene name makes e.g. "grotto" find every grotto
+        std::string searchText = places[place].name + " " + places[place].sceneName;
+        if (!placeSearch.PassFilter(searchText.c_str())) {
+            continue;
+        }
+
+        ImGui::PushID(place);
+        if (ImGui::Selectable(places[place].name.c_str(), place == navigationTarget)) {
+            clickedPlace = place;
+        }
+        ImGui::PopID();
+    }
+    ImGui::EndChild();
+
+    if (clickedPlace != -1) {
+        // Clicking the destination again clears it
+        SetNavigationTarget(clickedPlace == navigationTarget ? -1 : clickedPlace);
+        UpdateNavigation();
+    }
+
+    if (navigationCurrentPlace != -1) {
+        ImGui::TextDisabled("Current location: %s", places[navigationCurrentPlace].name.c_str());
+    }
+
+    if (navigationTarget == -1) {
+        ImGui::TextDisabled("Select a place to get directions");
+    } else {
+        ImGui::TextWrapped("Route to %s:", places[navigationTarget].name.c_str());
+        switch (navigationRoute.status) {
+            case EntrancePathfinder::ROUTE_FOUND:
+                // Long routes scroll instead of pushing the entrance list out of the window
+                ImGui::SetNextWindowSizeConstraints(ImVec2(0, 0), ImVec2(FLT_MAX, lineHeight * 8));
+                ImGui::BeginChild("ChildEntranceTrackerNavigationRoute", ImVec2(0, 0), ImGuiChildFlags_AutoResizeY);
+                for (size_t i = 0; i < navigationRoute.steps.size(); i++) {
+                    // The next thing to do stands out
+                    ImGui::PushStyleColor(ImGuiCol_Text, i == 0 ? COLOR_GREEN : IM_COL32_WHITE);
+                    ImGui::TextWrapped("%zu. %s", i + 1, navigationRoute.steps[i].text.c_str());
+                    ImGui::PopStyleColor();
+                }
+                ImGui::EndChild();
+                break;
+            case EntrancePathfinder::ROUTE_AT_DESTINATION:
+                ImGui::TextColored(ImColor(COLOR_GREEN), "Destination reached");
+                break;
+            case EntrancePathfinder::ROUTE_NO_KNOWN_ROUTE:
+                ImGui::TextColored(ImColor(COLOR_ORANGE), "No known route");
+                break;
+            case EntrancePathfinder::ROUTE_UNKNOWN_START:
+                ImGui::TextColored(ImColor(COLOR_ORANGE), "Current location unknown");
+                break;
+            case EntrancePathfinder::ROUTE_NONE:
+                break;
+        }
+    }
+
+    ImGui::Separator();
 }
 
 void EntranceTrackerWindow::Draw() {
@@ -851,6 +1039,11 @@ void EntranceTrackerWindow::DrawElement() {
         }
 
         static ImGuiTextFilter locationSearch;
+
+        if (CVarGetInteger(CVAR_TRACKER_ENTRANCE("EnableNavigation"), 1) && IS_RANDO &&
+            OTRGlobals::Instance->gRandomizer->GetRandoSettingValue(RSK_SHUFFLE_ENTRANCES)) {
+            DrawNavigation();
+        }
 
         uint8_t nextTreeState = 0;
         if (Button("Collapse All", ButtonOptions({ { .tooltip = "Collapse all entrance groups" } })
@@ -1067,6 +1260,14 @@ void EntranceTrackerWindow::InitElement() {
         [](int32_t fileNum) { InitEntranceTrackingData(); });
     GameInteractor::Instance->RegisterGameHook<GameInteractor::OnExitGame>(
         [](int32_t fileNum) { ClearEntranceTrackingData(); });
+
+    // Everything that can change the route of the navigation: Link's location, the known entrances and the inventory
+    GameInteractor::Instance->RegisterGameHook<GameInteractor::OnTransitionEnd>(
+        [](int16_t sceneNum) { routeDirty = true; });
+    GameInteractor::Instance->RegisterGameHook<GameInteractor::OnRandoEntranceDiscovered>(
+        [](u16 entranceIndex, u8 isReversedEntrance) { routeDirty = true; });
+    GameInteractor::Instance->RegisterGameHook<GameInteractor::OnItemReceive>(
+        [](GetItemEntry itemEntry) { routeDirty = true; });
 }
 
 void RegisterCheckTrackerWidgets() {

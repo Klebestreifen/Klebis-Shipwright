@@ -10,6 +10,7 @@
 
 #include "randomizer_check_tracker.h"
 #include "randomizer_entrance_tracker.h"
+#include "randomizer_entrance_pathfinder.h"
 #include "randomizer_item_tracker.h"
 #include "randomizer_tracker_windows.h"
 #include "randomizerTypes.h"
@@ -2450,17 +2451,11 @@ void InternalRecalculateAvailableChecks(RandomizerRegion startingRegion, RandoAg
     const auto& ctx = Rando::Context::GetInstance();
     logic = ctx->GetLogic();
 
-    int16_t entranceIndex = gSaveContext.entranceIndex;
-    if (startingRegion == RR_ROOT && entranceIndex >= 0 && entranceIndex < ENTR_MAX) {
-        // Try to find a mapped entrance
-        // e.g. ENTR_DEKU_TREE_0_1 (index 1) is not mapped, but ENTR_DEKU_TREE_ENTRANCE (index 0) is mapped
-        const int8_t scene = gEntranceTable[entranceIndex].scene;
-        for (; entranceIndex >= 0 && gEntranceTable[entranceIndex].scene == scene; entranceIndex--) {
-            const auto entrance = Rando::EntranceShuffler::GetEntranceByIndex(entranceIndex);
-            if (entrance != nullptr) {
-                startingRegion = entrance->GetOriginalConnectedRegionKey();
-                break;
-            }
+    if (startingRegion == RR_ROOT) {
+        // Try to find a mapped entrance for where Link last spawned
+        const RandomizerRegion spawnRegion = EntrancePathfinder::GetRegionFromEntranceIndex(gSaveContext.entranceIndex);
+        if (spawnRegion != RR_NONE) {
+            startingRegion = spawnRegion;
         }
     }
 
