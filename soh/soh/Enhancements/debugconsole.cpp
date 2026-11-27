@@ -517,11 +517,16 @@ static bool FileSelectHandler(std::shared_ptr<Ship::Console> Console, const std:
     gSaveContext.gameMode = GAMEMODE_FILE_SELECT;
     SET_NEXT_GAMESTATE(gGameState, FileChoose_Init, FileChooseContext);
     gGameState->running = false;
+    GameInteractor::Instance->ExecuteHooks<GameInteractor::OnExitGame>(gSaveContext.fileNum);
     return 0;
 }
 
 static bool QuitHandler(std::shared_ptr<Ship::Console> Console, const std::vector<std::string>& args,
                         std::string* output) {
+    if (gGameState != nullptr && gGameState->running) {
+        gGameState->running = false;
+        GameInteractor::Instance->ExecuteHooks<GameInteractor::OnExitGame>(gSaveContext.fileNum);
+    }
     Ship::Context::GetRawInstance()->GetWindow()->Close();
     return 0;
 }
