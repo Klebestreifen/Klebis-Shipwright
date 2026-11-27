@@ -12,6 +12,7 @@
 #include <libultraship/bridge/consolevariablebridge.h>
 
 #include "SaveManager.h"
+#include "RandoSaveMigration.h"
 #include "OTRGlobals.h"
 #include "Enhancements/game-interactor/GameInteractor.h"
 #include "Enhancements/randomizer/SeedContext.h"
@@ -685,6 +686,29 @@ void SaveManager::StartupCheckAndInitMeta(int fileNum) {
                         "Non-matching rando saves are unsupported, and the file has been renamed to\n    " +
                         newFileName + "\nIf this was not in error, the file should be deleted.");
                 return;
+            }
+
+            // Saves written by the official 9.3.1 build report the same version as this build but use an older
+            // enum layout. Rewrite them on disk before any index-based data is read.
+            if (RandoSaveMigration::MigrateDeweyBravoLayout(metaSaveBlock)) {
+                std::string backupFileName =
+                    Ship::Context::GetPathRelativeToAppDirectory("Save") +
+                    ("/file" + std::to_string(fileNum + 1) + "-" + std::to_string(GetUnixTimestamp()) + ".bak");
+                {
+                    std::lock_guard<std::mutex> guard(saveMtx);
+#if defined(__SWITCH__) || defined(__WIIU__)
+                    copy_file(fileName.c_str(), backupFileName.c_str());
+#else
+                    std::error_code ec;
+                    std::filesystem::copy_file(fileName, backupFileName, ec);
+#endif
+                    WriteFileSafely(fileName, metaSaveBlock.dump(1));
+                }
+                SohGui::RegisterPopup("Randomizer Save Migrated",
+                                      "The file in slot " + std::to_string(fileNum + 1) +
+                                          " was created by Ship of Harkinian 9.3.1 and has been updated to the "
+                                          "current save layout.\nA backup of the original file was written to\n    " +
+                                          backupFileName);
             }
         }
     }
