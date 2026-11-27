@@ -215,7 +215,7 @@ cd build-cmake
 # Generate
 cpack -G DEB
 cpack -G ZIP
-cpack -G External (creates appimage)
+cpack -G External # (creates appimage)
 ```
 
 ### Additional CMake Targets
