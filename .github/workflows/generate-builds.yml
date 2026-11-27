@@ -198,10 +198,12 @@ jobs:
       run: |
         choco install ninja -y
         Remove-Item -Path "C:\ProgramData\Chocolatey\bin\ccache.exe" -Force -ErrorAction SilentlyContinue
+
     - name: Git Checkout
       uses: actions/checkout@v7
       with:
         submodules: true
+
     - name: Configure ccache
       uses: hendrikmuhs/ccache-action@v1.2.23
       with:
@@ -212,6 +214,7 @@ jobs:
         restore-keys: |
           ${{ runner.os }}-ccache-${{ github.ref }}
           ${{ runner.os }}-ccache
+
     - name: Restore Cached VCPKG folder
       id: restore-cache-vcpkg
       uses: actions/cache/restore@v5
@@ -221,36 +224,60 @@ jobs:
           ${{ runner.os }}-vcpkg-${{ github.ref }}-
           ${{ runner.os }}-vcpkg-
         path: vcpkg
+
     - name: Configure Developer Command Prompt
       uses: TheMrMilchmann/setup-msvc-dev@v4
       with:
         arch: x64
+
+    - name: Add Cargo to PATH
+      run: |
+        "$env:USERPROFILE/.cargo/bin" >> $env:GITHUB_PATH
+
     - name: Download soh.o2r
       uses: actions/download-artifact@v8
       with:
         name: soh.o2r
         path: build-windows/soh
+
+    - name: Configure SoH
+      env:
+        VCPKG_ROOT: ${{ github.workspace }}/vcpkg
+      run: |
+        cmake -S . -B build-windows -G Ninja `
+          -DCMAKE_MAKE_PROGRAM=ninja `
+          -DCMAKE_BUILD_TYPE:STRING=Release `
+          -DCMAKE_C_COMPILER_LAUNCHER=ccache `
+          -DCMAKE_CXX_COMPILER_LAUNCHER=ccache `
+          -DBUILD_REMOTE_CONTROL=1 `
+          "-DVCPKG_ROOT=$env:VCPKG_ROOT"
+
+    - name: Save Cache VCPKG folder
+      if: ${{ github.ref_name == github.event.repository.default_branch && steps.restore-cache-vcpkg.outputs.cache-hit != 'true' }}
+      uses: actions/cache/save@v5
+      with:
+        key: ${{ steps.restore-cache-vcpkg.outputs.cache-primary-key }}
+        path: vcpkg
+
     - name: Build SoH
       env:
-        VCPKG_ROOT: ${{github.workspace}}/vcpkg
+        VCPKG_ROOT: ${{ github.workspace }}/vcpkg
       run: |
-        set $env:PATH="$env:USERPROFILE/.cargo/bin;$env:PATH"
-        cmake -S . -B build-windows -G Ninja -DCMAKE_MAKE_PROGRAM=ninja -DCMAKE_BUILD_TYPE:STRING=Release -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache -DBUILD_REMOTE_CONTROL=1
         cmake --build build-windows --config Release --parallel 10
 
-        (cd build-windows && cpack)
-        cd ..
-        mv _packages/*.zip _packages/soh-windows.zip
+    - name: Package SoH
+      working-directory: build-windows
+      run: cpack
+
+    - name: Rename package
+      run: Move-Item _packages/*.zip _packages/soh-windows.zip
+
     - name: Unzip package
       run: Expand-Archive -Path _packages/soh-windows.zip -DestinationPath soh-windows
+
     - name: Upload build
       uses: actions/upload-artifact@v7
       with:
         name: soh-windows
         path: soh-windows
-    - name: Save Cache VCPKG folder
-      if: ${{ github.ref_name == github.event.repository.default_branch }}
-      uses: actions/cache/save@v5
-      with:
-        key: ${{ steps.restore-cache-vcpkg.outputs.cache-primary-key }}
-        path: vcpkg
+
