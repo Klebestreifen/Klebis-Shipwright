@@ -12,7 +12,7 @@
 #include <libultraship/bridge/consolevariablebridge.h>
 
 #include "SaveManager.h"
-#include "RandoSaveMigration.h"
+#include "SaveMigration.h"
 #include "OTRGlobals.h"
 #include "Enhancements/game-interactor/GameInteractor.h"
 #include "Enhancements/randomizer/SeedContext.h"
@@ -664,51 +664,49 @@ void SaveManager::StartupCheckAndInitMeta(int fileNum) {
             std::lock_guard<std::mutex> guard(saveMtx);
             WriteFileSafely(fileName, metaSaveBlock.dump(1));
         } else {
-            nlohmann::json& statsBlock = sections["sohStats"]["data"];
-            s16 major = statsBlock.value("buildVersionMajor", 0);
-            s16 minor = statsBlock.value("buildVersionMinor", 0);
-            s16 patch = statsBlock.value("buildVersionPatch", 0);
-            // block loading outdated rando save
-            if (!(major == gBuildVersionMajor && minor == gBuildVersionMinor && patch == gBuildVersionPatch)) {
-                std::string newFileName =
-                    Ship::Context::GetPathRelativeToAppDirectory("Save") +
-                    ("/file" + std::to_string(fileNum + 1) + "-" + std::to_string(GetUnixTimestamp()) + ".bak");
-#if defined(__SWITCH__) || defined(__WIIU__)
-                copy_file(fileName.c_str(), newFileName.c_str());
-                std::filesystem::remove(fileName);
-#else
-                std::filesystem::rename(fileName, newFileName);
-#endif
-                SohGui::RegisterPopup(
-                    "Outdated Randomizer Save",
-                    "The SoH version in the file in slot " + std::to_string(fileNum + 1) +
-                        " does not match the currently running version.\n" +
-                        "Non-matching rando saves are unsupported, and the file has been renamed to\n    " +
-                        newFileName + "\nIf this was not in error, the file should be deleted.");
-                return;
-            }
-
-            // Saves written by the official 9.3.1 build report the same version as this build but use an older
-            // enum layout. Rewrite them on disk before any index-based data is read.
-            if (RandoSaveMigration::MigrateDeweyBravoLayout(metaSaveBlock)) {
+            // Rando saves are tied to the save layout of the build that wrote them. Saves from older builds are
+            // migrated in place (and backed up) before any index-based data is read; saves this build cannot
+            // migrate are moved out of the way.
+            SaveMigration::Result migration = SaveMigration::Migrate(metaSaveBlock);
+            if (migration.outcome != SaveMigration::Outcome::UpToDate) {
                 std::string backupFileName =
                     Ship::Context::GetPathRelativeToAppDirectory("Save") +
-                    ("/file" + std::to_string(fileNum + 1) + "-" + std::to_string(GetUnixTimestamp()) + ".bak");
-                {
-                    std::lock_guard<std::mutex> guard(saveMtx);
+                    ("/file" + std::to_string(fileNum + 1) + "-" + migration.from.ToString() + "-" +
+                     std::to_string(GetUnixTimestamp()) + ".bak");
+                std::string currentVersion = std::string((const char*)gBuildVersion);
+
+                if (migration.outcome == SaveMigration::Outcome::Migrated) {
+                    {
+                        std::lock_guard<std::mutex> guard(saveMtx);
+#if defined(__SWITCH__) || defined(__WIIU__)
+                        copy_file(fileName.c_str(), backupFileName.c_str());
+#else
+                        std::error_code ec;
+                        std::filesystem::copy_file(fileName, backupFileName, ec);
+#endif
+                        WriteFileSafely(fileName, metaSaveBlock.dump(1));
+                    }
+                    SohGui::RegisterPopup("Save Migrated",
+                                          "The file in slot " + std::to_string(fileNum + 1) +
+                                              " was created by Ship of Harkinian " + migration.fromName +
+                                              " and has been migrated to KShip " + currentVersion +
+                                              ".\nA backup of the original file was written to\n    " +
+                                              backupFileName);
+                } else {
 #if defined(__SWITCH__) || defined(__WIIU__)
                     copy_file(fileName.c_str(), backupFileName.c_str());
+                    std::filesystem::remove(fileName);
 #else
-                    std::error_code ec;
-                    std::filesystem::copy_file(fileName, backupFileName, ec);
+                    std::filesystem::rename(fileName, backupFileName);
 #endif
-                    WriteFileSafely(fileName, metaSaveBlock.dump(1));
+                    SohGui::RegisterPopup("Unsupported Save Version",
+                                          "The file in slot " + std::to_string(fileNum + 1) + " was created by " +
+                                              migration.fromName + ", which KShip " + currentVersion +
+                                              " cannot migrate.\nNon-migratable rando saves are unsupported, and "
+                                              "the file has been renamed to\n    " +
+                                              backupFileName + "\nIf this was not in error, the file should be deleted.");
+                    return;
                 }
-                SohGui::RegisterPopup("Randomizer Save Migrated",
-                                      "The file in slot " + std::to_string(fileNum + 1) +
-                                          " was created by Ship of Harkinian 9.3.1 and has been updated to the "
-                                          "current save layout.\nA backup of the original file was written to\n    " +
-                                          backupFileName);
             }
         }
     }
