@@ -13,7 +13,7 @@
 // discovered it, no matter whether logic is ignored or not.
 namespace EntrancePathfinder {
 
-typedef enum {
+typedef enum RouteStepType {
     ROUTE_STEP_ENTRANCE,       // Loading zone that has an entrance index
     ROUTE_STEP_PASSAGE,        // Fixed scene change that the randomizer never shuffles
     ROUTE_STEP_WARP_SONG,      // Play a warp song
@@ -24,13 +24,13 @@ typedef enum {
     ROUTE_STEP_BECOME_CHILD,
 } RouteStepType;
 
-typedef struct {
+typedef struct RouteStep {
     RouteStepType type;
     int16_t entranceIndex; // Entrance index of the transition, -1 if the step has none
     std::string text;      // Description to show to the player
 } RouteStep;
 
-typedef enum {
+typedef enum RouteStatus {
     ROUTE_NONE,           // Nothing was calculated (no destination, or the logic graph is not available)
     ROUTE_FOUND,          // steps holds the way to the destination
     ROUTE_AT_DESTINATION, // Link already is at the destination
@@ -38,14 +38,14 @@ typedef enum {
     ROUTE_UNKNOWN_START,  // Link's current location could not be matched to a region
 } RouteStatus;
 
-typedef struct {
+typedef struct Route {
     RouteStatus status = ROUTE_NONE;
     std::vector<RouteStep> steps;
 } Route;
 
 // A destination the player can pick. This is not strictly a scene: every grotto uses SCENE_GROTTOS, both bazaars use
 // SCENE_BAZAAR and so on, so a place is a group of connected regions that share a scene.
-typedef struct {
+typedef struct Place {
     std::string name;
     std::string sceneName; // Name of the scene the place belongs to, used as an additional search term
     bool visited;          // Only visited places may be offered as a destination
