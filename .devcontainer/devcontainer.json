@@ -11,10 +11,21 @@
 
 	// Configure tool-specific properties.
 	"customizations": {
-		// Configure properties specific to VS Code.
 		"vscode": {
-			"settings": {},
-			"extensions": []
+			"extensions": [
+				"llvm-vs-code-extensions.vscode-clangd",
+				"ms-vscode.cmake-tools",
+				"vadimcn.vscode-lldb"
+			],
+			"settings": {
+			  "C_Cpp.intelliSenseEngine": "disabled",
+			  "clangd.arguments": [
+				"--background-index",
+				"--compile-commands-dir=${workspaceFolder}/build-cmake-debug",
+				"--header-insertion=iwyu"
+			  ],
+			  "cmake.configureOnOpen": false
+			}
 		}
 	}
 
